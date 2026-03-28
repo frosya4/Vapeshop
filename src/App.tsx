@@ -1,13 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as vkBridgeModule from '@vkontakte/vk-bridge';
-import { View, Panel, PanelHeader, PanelHeaderBack, Group, Cell, Avatar, Spinner, Button, Div, Title, Text, SimpleCell, SplitLayout, SplitCol, FormItem, Input, Switch, SegmentedControl, Search } from '@vkontakte/vkui';
-import { Icon28PaymentCardOutline, Icon28UserOutline, Icon28GiftOutline, Icon28ListOutline, Icon28DownloadOutline } from '@vkontakte/icons';
+import { View, Panel, PanelHeader, PanelHeaderBack, Group, Cell, Avatar, Spinner, Button, Div, Title, Text, SimpleCell, SplitLayout, SplitCol, FormItem, Input, Switch, SegmentedControl, Search, ModalRoot, ModalCard } from '@vkontakte/vkui';
+import { Icon28PaymentCardOutline, Icon28UserOutline, Icon28GiftOutline, Icon28ListOutline, Icon28DownloadOutline, Icon28QrCodeOutline } from '@vkontakte/icons';
 import { QRCodeSVG } from 'qrcode.react';
+import { Html5QrcodeScanner } from 'html5-qrcode';
 import axios from 'axios';
 
 const vkBridge = vkBridgeModule.default || vkBridgeModule;
 
-const API_URL = "http://localhost:8000";
+const API_URL = "https://vape-loyalty-shop.duckdns.org";
+const APP_URL = "https://frosya4.github.io/Vapeshop";
 
 interface UserData {
   id: number;
@@ -33,11 +35,23 @@ interface ClientData {
   registered_at: string;
 }
 
+interface TransactionData {
+  id: number;
+  client_name: string;
+  client_vk_id: number;
+  amount: number;
+  points_change: number;
+  description: string;
+  date: string;
+  cashier_name?: string | null;
+  cashier_vk_id?: number | null;
+}
+
 function App() {
   const [activePanel, setActivePanel] = useState('main');
   const [userData, setUserData] = useState<UserData | null>(null);
   const [clients, setClients] = useState<ClientData[]>([]);
-  const [transactions, setTransactions] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<TransactionData[]>([]);
   const [adminTab, setAdminTab] = useState<'users' | 'transactions'>('users');
   const [selectedClient, setSelectedClient] = useState<ClientData | null>(null);
   const [clientRole, setClientRole] = useState<string>('user');
@@ -51,6 +65,12 @@ function App() {
   const [transactionAmount, setTransactionAmount] = useState<string>('');
   const [isDeducting, setIsDeducting] = useState<boolean>(false);
 
+  // Camera QR scanner state
+  const [isScannerModalOpen, setIsScannerModalOpen] = useState(false);
+  const [scannerError, setScannerError] = useState<string>('');
+  const scannerRef = useRef<Html5QrcodeScanner | null>(null);
+  const [transactionTimestamp, setTransactionTimestamp] = useState<string | null>(null);
+
   useEffect(() => {
     async function fetchTargetData() {
       if (!scanTarget) {
@@ -60,12 +80,89 @@ function App() {
       try {
         const res = await axios.get(`${API_URL}/api/user/${scanTarget}`);
         setScanTargetData(res.data);
+        setTransactionTimestamp(null); // Сброс времени при новом сканировании
       } catch (e) {
         console.error("Target user not found");
+        setScanTargetData(null);
       }
     }
     fetchTargetData();
   }, [scanTarget]);
+
+  // Функция открытия сканера QR-кода
+  const openScanner = () => {
+    setScannerError('');
+    setIsScannerModalOpen(true);
+  };
+
+  // Инициализация сканера при открытии модального окна
+  useEffect(() => {
+    if (isScannerModalOpen && !scannerRef.current) {
+      setTimeout(() => {
+        const scanner = new Html5QrcodeScanner(
+          "qr-reader",
+          {
+            fps: 10,
+            qrbox: { width: 250, height: 250 },
+            aspectRatio: 1.0
+          },
+          false
+        );
+
+        scannerRef.current = scanner;
+
+        scanner.render(
+          (decodedText) => {
+            // Успешное сканирование
+            handleQRCodeScanned(decodedText);
+            scanner.clear();
+            scannerRef.current = null;
+            setIsScannerModalOpen(false);
+          },
+          (error) => {
+            // Ошибка сканирования (игнорируем, это нормально при плохом освещении)
+            console.warn("QR scan error:", error);
+          }
+        );
+      }, 100);
+    }
+
+    // Очистка сканера при закрытии
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current.clear();
+        scannerRef.current = null;
+      }
+    };
+  }, [isScannerModalOpen]);
+
+  // Обработка отсканированного QR-кода
+  const handleQRCodeScanned = (decodedText: string) => {
+    console.log("QR Code scanned:", decodedText);
+
+    // Извлекаем VK ID из URL (формат: https://.../#scan_123456)
+    let vkId = null;
+
+    // Пробуем найти паттерн #scan_XXXXX
+    const scanMatch = decodedText.match(/#scan_(\d+)/);
+    if (scanMatch) {
+      vkId = scanMatch[1];
+    } else {
+      // Пробуем найти просто цифры в конце URL
+      const urlMatch = decodedText.match(/(\d+)$/);
+      if (urlMatch) {
+        vkId = urlMatch[1];
+      }
+    }
+
+    if (vkId) {
+      setScanTarget(vkId);
+      window.location.hash = `#scan_${vkId}`;
+      setActivePanel('scanner');
+    } else {
+      setScannerError('Неверный формат QR-кода. Ожидается код клиента.');
+    }
+  };
 
   useEffect(() => {
     async function fetchData() {
@@ -83,8 +180,25 @@ function App() {
           const user = await vkBridge.send('VKWebAppGetUserInfo');
           userId = user.id;
         } catch (bridgeError) {
-          console.warn("VK Bridge unavailable, using mock user 532232600");
-          userId = 532232600;
+          console.warn("VK Bridge unavailable, using manual ID or mock");
+          // Проверяем, есть ли сохраненный ID кассира в браузере
+          const savedId = localStorage.getItem('cashier_vk_id');
+          if (savedId) {
+            userId = parseInt(savedId);
+          } else {
+            // Если нет, просим ввести (или используем заглушку для теста)
+            const inputId = prompt("Вы открыли приложение вне ВК. Введите ваш VK ID для авторизации как кассира:", "");
+            if (inputId) {
+              userId = parseInt(inputId);
+              localStorage.setItem('cashier_vk_id', inputId);
+            }
+          }
+        }
+
+        if (!userId) {
+          setError('Авторизация не удалась. Откройте приложение через ВК или введите ID.');
+          setLoading(false);
+          return;
         }
 
         const res = await axios.get(`${API_URL}/api/user/${userId}`);
@@ -201,6 +315,17 @@ function App() {
   const processTransaction = async () => {
     if (!userData || !scanTarget || !transactionAmount) return;
     setLoading(true);
+
+    const now = new Date();
+    const timestamp = now.toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    setTransactionTimestamp(timestamp);
+
     let amount = parseFloat(transactionAmount);
     if (isDeducting) {
       amount = -Math.abs(amount); // Deduct
@@ -214,18 +339,63 @@ function App() {
         client_vk_id: parseInt(scanTarget),
         amount: amount
       });
-      alert(`Успешно! ${res.data.message}\nНовый баланс клиента: ${res.data.new_balance}`);
+      alert(`✅ Успешно!\n${res.data.message}\nНовый баланс клиента: ${res.data.new_balance}\n⏰ Время: ${timestamp}`);
       setActivePanel('main');
       setScanTarget(null);
       setTransactionAmount('');
       setIsDeducting(false);
+      setTransactionTimestamp(null);
       window.location.hash = ''; // Clear hash
     } catch (e: any) {
       alert("Ошибка обработки: " + (e.response?.data?.detail || e.message));
+      setTransactionTimestamp(null);
     } finally {
       setLoading(false);
     }
   };
+
+  const modal = (
+    <ModalRoot activeModal={isScannerModalOpen ? 'qr-scanner' : undefined}>
+      <ModalCard
+        id="qr-scanner"
+        onClose={() => {
+          setIsScannerModalOpen(false);
+          if (scannerRef.current) {
+            scannerRef.current.clear();
+            scannerRef.current = null;
+          }
+        }}
+        actions={
+          <Button
+            size="l"
+            mode="secondary"
+            onClick={() => {
+              setIsScannerModalOpen(false);
+              if (scannerRef.current) {
+                scannerRef.current.clear();
+                scannerRef.current = null;
+              }
+            }}
+          >
+            Закрыть
+          </Button>
+        }
+      >
+        <Div style={{ textAlign: 'center' }}>
+          <Title level="2" style={{ marginBottom: 8 }}>📷 Сканирование QR-кода</Title>
+          <Text style={{ marginBottom: 16, color: '#8e8e93' }}>
+            Наведите камеру на QR-код клиента
+          </Text>
+          <div id="qr-reader" style={{ width: '100%', maxWidth: 400, margin: '0 auto' }} />
+          {scannerError && (
+            <Text style={{ marginTop: 16, color: '#ff5252' }}>
+              ⚠️ {scannerError}
+            </Text>
+          )}
+        </Div>
+      </ModalCard>
+    </ModalRoot>
+  );
 
   if (loading && activePanel === 'main') {
     return (
@@ -245,7 +415,10 @@ function App() {
   }
 
   return (
-    <SplitLayout header={<PanelHeader delimiter="none" />}>
+    <SplitLayout
+      header={<PanelHeader delimiter="none" />}
+      modal={modal}
+    >
       <SplitCol>
         <View activePanel={activePanel}>
           <Panel id="main">
@@ -284,7 +457,7 @@ function App() {
 
                     <div style={{ background: '#ffffff', padding: 16, borderRadius: 16, marginBottom: 24 }}>
                       <QRCodeSVG
-                        value={`http://localhost:5173/#scan_${userData.vk_id}`}
+                        value={`${APP_URL}/#scan_${userData.vk_id}`}
                         size={180}
                       />
                     </div>
@@ -367,7 +540,7 @@ function App() {
             <Search
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={adminTab === 'users' ? '\u041f\u043e\u0438\u0441\u043a \u043f\u043e \u0438\u043c\u0435\u043d\u0438, ID, \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0443...' : '\u041f\u043e\u0438\u0441\u043a \u043f\u043e \u043f\u043e\u043a\u0443\u043f\u0430\u0442\u0435\u043b\u044e, ID...'}
+              placeholder={adminTab === 'users' ? 'Поиск по имени, ID, телефону...' : 'Поиск по покупателю, ID...'}
               after={null}
             />
 
@@ -422,7 +595,7 @@ function App() {
                     .map(tx => (
                       <SimpleCell
                         key={tx.id}
-                        subtitle={`${tx.description} | ${tx.date}`}
+                        subtitle={`${tx.description} | ${tx.date}${tx.cashier_name ? ` | Кассир: ${tx.cashier_name}` : ''}`}
                         after={
                           <Text style={{
                             color: tx.points_change > 0 ? '#4bb34b' : '#ff3347',
@@ -493,7 +666,7 @@ function App() {
                 selectedClient && transactions.filter(t => t.client_vk_id === selectedClient.vk_id).map(tx => (
                   <SimpleCell
                     key={tx.id}
-                    subtitle={`${tx.description} | ${tx.date}`}
+                    subtitle={`${tx.description} | ${tx.date}${tx.cashier_name ? ` | Кассир: ${tx.cashier_name}` : ''}`}
                     after={
                       <Text style={{
                         color: tx.points_change > 0 ? '#4bb34b' : '#ff3347',
@@ -519,13 +692,37 @@ function App() {
             {!scanTarget && !scanTargetData ? (
               <Group>
                 <Div style={{ textAlign: 'center', marginBottom: 8 }}>
-                  <Title level="3" style={{ marginBottom: 8 }}>\u041f\u043e\u0438\u0441\u043a \u043a\u043b\u0438\u0435\u043d\u0442\u0430</Title>
-                  <Text style={{ color: '#8e8e93' }}>\u0412\u0432\u0435\u0434\u0438\u0442\u0435 VK ID \u043a\u043b\u0438\u0435\u043d\u0442\u0430 \u0432\u0440\u0443\u0447\u043d\u0443\u044e</Text>
+                  <Title level="3" style={{ marginBottom: 8 }}>Поиск клиента</Title>
+                  <Text style={{ color: '#8e8e93' }}>Отсканируйте QR-код или введите VK ID вручную</Text>
                 </Div>
-                <FormItem top="VK ID \u043f\u043e\u043a\u0443\u043f\u0430\u0442\u0435\u043b\u044f">
+
+                {/* Кнопка сканирования QR-кода камерой */}
+                <Div>
+                  <Button
+                    size="l"
+                    stretched
+                    mode="primary"
+                    before={<Icon28QrCodeOutline />}
+                    onClick={openScanner}
+                  >
+                    📷 Сканировать QR-код камерой
+                  </Button>
+                </Div>
+
+                <Div style={{ display: 'flex', alignItems: 'center', margin: '16px 0' }}>
+                  <Div style={{ flex: 1, height: 1, background: '#e1e3e6', opacity: 0.5 }} />
+                  <Text style={{ margin: '0 12px', color: '#8e8e93' }}>или</Text>
+                  <Div style={{ flex: 1, height: 1, background: '#e1e3e6', opacity: 0.5 }} />
+                </Div>
+
+                <FormItem top="VK ID покупателя">
                   <Input
-                    type="number"
-                    placeholder="\u041d\u0430\u043f\u0440\u0438\u043c\u0435\u0440: 532232600"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck="false"
+                    placeholder="Например: 532232600"
                     onChange={(e) => {
                       const val = e.target.value.trim();
                       if (val) { setScanTarget(val); window.location.hash = `#scan_${val}`; }
@@ -535,11 +732,19 @@ function App() {
               </Group>
             ) : scanTargetData ? (
               <Group>
+                {userData && (
+                  <Div style={{ textAlign: 'right', paddingBottom: 0 }}>
+                    <Text style={{ color: '#007aff', fontWeight: 'bold' }}>
+                      👤 Кассир: {userData.first_name} {userData.last_name}
+                    </Text>
+                  </Div>
+                )}
+
                 <SimpleCell
                   before={<Avatar size={48} fallbackIcon={<Icon28UserOutline />} />}
-                  subtitle={`ID: ${scanTargetData.vk_id} | Текущий баланс: ${scanTargetData.balance}`}
+                  subtitle={`ID: ${scanTargetData.vk_id} | Баланс: ${scanTargetData.balance}`}
                 >
-                  <Title level="3">{scanTargetData.first_name} {scanTargetData.last_name}</Title>
+                  <Title level="3">{scanTargetData.first_name}</Title>
                 </SimpleCell>
 
                 <FormItem>
@@ -553,9 +758,16 @@ function App() {
 
                 <FormItem top={isDeducting ? "Сумма списания (баллов)" : "Сумма чека (рублей)"}>
                   <Input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck="false"
                     value={transactionAmount}
-                    onChange={e => setTransactionAmount(e.target.value)}
+                    onChange={e => {
+                      const val = e.target.value.replace(/,/g, '.');
+                      setTransactionAmount(val);
+                    }}
                     placeholder={isDeducting ? "Например: 200" : "Например: 1500"}
                   />
                   {isDeducting ? (
@@ -564,10 +776,19 @@ function App() {
                     </Text>
                   ) : (
                     <Text style={{ marginTop: 8, color: '#8e8e93', fontSize: 13 }}>
-                      Будет начислено: {((parseFloat(transactionAmount) || 0) * 0.05).toFixed(2)} баллов (5%)
+                      Будет начислено: {((parseFloat(transactionAmount) || 0) * 0.03).toFixed(2)} баллов (3%)
                     </Text>
                   )}
                 </FormItem>
+
+                {/* Отображение времени последней транзакции */}
+                {transactionTimestamp && (
+                  <Div style={{ textAlign: 'center', marginBottom: 8 }}>
+                    <Text style={{ color: '#4bb34b', fontWeight: 'bold' }}>
+                      ⏰ Последняя операция: {transactionTimestamp}
+                    </Text>
+                  </Div>
+                )}
 
                 <Div>
                   <Button
@@ -575,7 +796,7 @@ function App() {
                     stretched
                     mode="primary"
                     onClick={processTransaction}
-                    disabled={loading || !transactionAmount || (isDeducting && parseFloat(transactionAmount) > scanTargetData.balance)}
+                    disabled={loading || !transactionAmount || isNaN(parseFloat(transactionAmount)) || (isDeducting && parseFloat(transactionAmount) > scanTargetData.balance)}
                   >
                     {loading ? <Spinner size="s" /> : (isDeducting ? "Списать баллы" : "Провести чек")}
                   </Button>

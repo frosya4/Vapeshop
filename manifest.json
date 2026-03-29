@@ -1,0 +1,20 @@
+{
+  "name": "AiHookah - Программа лояльности",
+  "short_name": "AiHookah",
+  "description": "Программа лояльности AiHookah",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1c1c1e",
+  "theme_color": "#0a84ff",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["shopping", "lifestyle"],
+  "lang": "ru"
+}
